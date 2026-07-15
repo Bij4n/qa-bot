@@ -31,15 +31,30 @@ the command list). Never use any other browser tool for this workflow.
    - **Quick** — critical paths only, report Critical/High findings (~5 min)
    - **Standard** — all pages + forms + APIs, report Critical/High/Medium (default)
    - **Exhaustive** — everything, including cosmetic issues and multi-browser
-3. Start the session — this creates the report directory and clears buffers:
+3. Start the session — this creates the organized report directory and clears buffers:
 
 ```bash
 qab session start <app-name>
 qab engine chromium
 ```
 
-Remember the session directory path returned — the report and all screenshots
-live there.
+The session directory is structured by test phase, and everything routes
+automatically:
+
+```
+reports/<timestamp>-<app-name>/
+├── report.md      # you write this at the end
+├── frontend/      # desktop screenshots (current phase on session start)
+├── mobile/        # mobile-viewport screenshots
+├── backend/       # api-log.jsonl — every qab api call, auto-logged
+└── recordings/    # screen recordings, one per phase per engine (.webm)
+```
+
+Switch phases with `qab phase frontend|mobile|backend`. Each phase is screen-
+recorded: the recording starts when you enter the phase and is finalized as
+`recordings/<phase>-<engine>.webm` when you leave it (or end the session).
+Screenshots land in the current phase's folder. Remember the session
+directory path returned — the report references everything relative to it.
 
 ## Step 1 — Discovery
 
@@ -58,6 +73,9 @@ money/feature flow). State the inventory briefly before proceeding.
 
 ## Step 2 — Frontend pass
 
+You are already in the `frontend` phase (session start puts you there), so the
+desktop pass is being screen-recorded and screenshots go to `frontend/`.
+
 For each page in the inventory:
 
 1. `qab goto <page-url>` — the output reports **new console errors and failed
@@ -72,13 +90,27 @@ For each page in the inventory:
    - Buttons and links: `qab click`, then check where you landed.
    - After every interaction the CLI reports console/network deltas — a JS
      error on click is a finding even if the UI looks fine.
-5. Responsive check (Standard+): `qab viewport 375 812`, `qab shot <page>-mobile`,
-   look for horizontal overflow or unusable controls, then `qab viewport 1280 800`.
-
 Screenshot every defect the moment you see it (`qab shot bug-<short-name>`),
 before navigating away.
 
+## Step 2b — Mobile pass (Standard+)
+
+```bash
+qab phase mobile
+```
+
+This finalizes the frontend recording and starts a mobile one at 375x812.
+Revisit the key pages from the inventory: `qab goto` each, `qab shot <page>`,
+and look for horizontal overflow, unusable controls, overlapping or cut-off
+content. Screenshots land in `mobile/` automatically. Do not use
+`qab viewport` for this inside a session — the phase handles the viewport,
+and recordings keep the size they started with.
+
 ## Step 3 — Backend pass
+
+```bash
+qab phase backend
+```
 
 1. `qab network` — review every API call the frontend made during Step 2.
    Findings here: 4xx/5xx responses during normal flows, endpoints slower
@@ -90,6 +122,10 @@ before navigating away.
    - Auth: does an unauthenticated request to a protected endpoint return
      401/403 (correct) or 200/500 (finding — potentially Critical)?
 3. Note response latency (`ms` in the output) for the report.
+
+Every `qab api` call is automatically appended to `backend/api-log.jsonl`
+(method, URL, status, latency, body preview) — cite it in the report as the
+backend evidence trail.
 
 ## Step 4 — Classify findings
 
@@ -133,17 +169,23 @@ Write `report.md` inside the session directory:
 ## Findings
 
 ### [CRITICAL] <title>
+**Area:** frontend | mobile | backend
 **Repro:** 1. … 2. … 3. …
 **Expected:** … **Actual:** …
-![evidence](<screenshot-file>.png)
+![evidence](frontend/<screenshot-file>.png)
 
 <repeat per finding, ordered by severity>
 
 ## What was tested
 <the inventory: pages, forms, endpoints — including everything that PASSED>
 
+## Evidence
+- Screenshots: frontend/ (n), mobile/ (n)
+- Screen recordings: recordings/ — <list the .webm files>
+- API log: backend/api-log.jsonl (n calls)
+
 ## Environment
-<browser engine + viewport(s), OS, app version/commit if known>
+<browser engine(s) + viewport(s), OS, app version/commit if known>
 ```
 
 Use relative image paths so the photos render when the report is viewed from
@@ -161,7 +203,9 @@ qab engine chrome   # real Chrome, if installed
 
 Screenshot the same key pages per engine (`qab shot <page>-firefox`). Any
 behavior or rendering difference between engines is its own finding, tagged
-with the affected browser.
+with the affected browser. Switching engines finalizes the current recording
+and starts a new one — so per-engine passes each get their own
+`recordings/<phase>-<engine>.webm`.
 
 ## Rules
 
