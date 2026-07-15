@@ -1,0 +1,25 @@
+{
+  "name": "qa-bot",
+  "version": "0.1.0",
+  "description": "AI-driven QA agent: multi-browser testing CLI + Claude Code skill with photographed session reports",
+  "type": "module",
+  "bin": {
+    "qab": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "daemon": "tsx src/daemon.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.54.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
