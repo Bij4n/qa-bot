@@ -3,7 +3,7 @@
 AI-driven QA agent for web applications. An AI agent (your Claude Code session)
 drives a real browser through your app — frontend flows and backend APIs — and
 produces a per-session report with a health score, severity-ranked findings,
-repro steps, and full-page screenshots.
+repro steps, full-page screenshots, and screen recordings of every test phase.
 
 Two pieces:
 
@@ -50,32 +50,50 @@ Then in any Claude Code session:
 
 ## What a session produces
 
+Sessions are organized by test phase — frontend (desktop), mobile, and
+backend/API — with everything routed automatically:
+
 ```
 reports/2026-07-15-14-30-myapp/
-├── report.md            # health score, findings by severity, repro steps
-├── 01-home.png          # full-page screenshot of every page tested
-├── 02-login.png
-├── 03-bug-checkout-500.png
-└── ...
+├── report.md                        # health score, findings by severity, repro steps
+├── frontend/                        # desktop pass — full-page screenshots
+│   ├── 01-home.png
+│   └── 02-bug-checkout-500.png
+├── mobile/                          # mobile pass (375x812)
+│   └── 01-home.png
+├── backend/
+│   └── api-log.jsonl                # every API call: status, latency, body preview
+└── recordings/                      # screen recordings, per phase per engine
+    ├── frontend-chromium.webm
+    ├── mobile-chromium.webm
+    └── frontend-firefox.webm
 ```
 
+`qab phase frontend|mobile|backend` switches phases: it finalizes the current
+phase's screen recording, starts a new one at the right viewport, and routes
+subsequent screenshots to that phase's folder. `qab api` calls are logged to
+`backend/api-log.jsonl` automatically during a session.
+
 Findings follow a strict format — severity (Critical / High / Medium /
-Cosmetic), numbered repro steps, expected vs actual, and photographic
-evidence. The health score starts at 10 and deducts per finding.
+Cosmetic), affected area, numbered repro steps, expected vs actual, and
+photographic evidence. The health score starts at 10 and deducts per finding.
 
 ## Using `qab` directly
 
 ```bash
-qab session start myapp        # begin a session → reports/<ts>-myapp/
+qab session start myapp        # begin a session → reports/<ts>-myapp/ (recording starts)
 qab goto http://localhost:3000 # navigate; reports console errors + failed requests
 qab snapshot                   # accessibility-tree view of the page
 qab click "text=Sign up"       # css / text= / role= selectors
 qab fill "#email" user@test.dev
-qab shot signup-page           # full-page screenshot into the session dir
-qab viewport 375 812           # mobile responsive check
+qab shot signup-page           # full-page screenshot → frontend/
+qab phase mobile               # finalize frontend video, record mobile at 375x812
+qab shot signup-page           # → mobile/
+qab phase backend              # finalize mobile video, start backend phase
+qab api POST http://localhost:3000/api/users '{"email":""}'   # → backend/api-log.jsonl
 qab network failed             # every failed request captured so far
-qab api POST http://localhost:3000/api/users '{"email":""}'
-qab engine firefox             # switch engines mid-session
+qab engine firefox             # switch engines (recordings are per phase, per engine)
+qab session end                # finalize the last recording, list all recordings
 qab stop                       # shut the daemon down
 ```
 
