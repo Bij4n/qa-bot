@@ -20,7 +20,7 @@ real browser. Chromium, Chrome and Firefox, on Linux, macOS and Windows.
 ## Setup
 
 ```bash
-git clone https://github.com/Bij4n/QA-Bot.git
+git clone https://github.com/Bij4n/qa-bot.git
 cd QA-Bot
 npm install
 npx playwright install chromium firefox
