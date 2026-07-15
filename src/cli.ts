@@ -10,8 +10,13 @@ import type { DaemonState } from './state.js';
 const HELP = `qab — QA-Bot browser CLI (chromium | chrome | firefox, all platforms)
 
 Session
-  qab session start <name>     begin a QA session (reports/<ts>-<name>/, clears buffers)
-  qab session end              close the current session
+  qab session start <name>     begin a QA session (reports/<ts>-<name>/ with
+                               frontend/ mobile/ backend/ recordings/, clears buffers)
+  qab phase <name>             switch test phase: frontend | mobile | backend.
+                               Finalizes the previous phase's video, starts a new
+                               recording at the phase viewport (mobile = 375x812).
+                               Screenshots route to the phase's folder.
+  qab session end              close the session, finalize the last recording
   qab status                   daemon + page state
 
 Navigation & interaction
@@ -21,7 +26,7 @@ Navigation & interaction
   qab press <key>              press a key (Enter, Tab, Escape)
   qab hover <selector>         hover an element
   qab scroll [bottom|top|px]   scroll the page
-  qab viewport <w> <h>         resize (e.g. 375 812 for mobile)
+  qab viewport <w> <h>         resize (in a session, prefer: qab phase mobile)
 
 Observation
   qab snapshot                 accessibility-tree snapshot of the page
@@ -31,7 +36,8 @@ Observation
   qab eval <js>                evaluate JS in the page
 
 Backend
-  qab api <METHOD> <url> [json-body]   direct HTTP check (status, latency, body)
+  qab api <METHOD> <url> [json-body]   direct HTTP check (status, latency, body);
+                                       auto-logged to backend/api-log.jsonl in a session
 
 Engine & lifecycle
   qab engine <name> [headed]   switch browser: chromium, chrome, firefox
@@ -114,7 +120,6 @@ async function main(): Promise<void> {
       return;
     }
     await send(state, 'stop', []);
-    clearState();
     console.log('daemon stopped');
     return;
   }

@@ -1,16 +1,30 @@
 #!/usr/bin/env node
 // QA-Bot browser daemon. Holds a live Playwright browser so each CLI call
 // is a fast localhost HTTP request instead of a cold browser launch.
+//
+// Sessions are organized by test phase (frontend / mobile / backend). Each
+// phase runs in its own browser context so Playwright's video recording —
+// which only finalizes when a context closes — yields one recording per
+// phase: recordings/<phase>-<engine>.webm.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { chromium, firefox } from 'playwright';
 import type { Browser, BrowserContext, Page } from 'playwright';
-import { LOG_FILE, STATE_DIR, clearState, writeState } from './state.js';
+import { LOG_FILE, STATE_DIR, clearStateIfOwned, writeState } from './state.js';
 
 const ENGINES = ['chromium', 'chrome', 'firefox'] as const;
 type Engine = (typeof ENGINES)[number];
+
+const PHASES = ['frontend', 'mobile', 'backend'] as const;
+type Phase = (typeof PHASES)[number];
+
+const PHASE_VIEWPORTS: Record<Phase, { width: number; height: number }> = {
+  frontend: { width: 1280, height: 800 },
+  mobile: { width: 375, height: 812 },
+  backend: { width: 1280, height: 800 },
+};
 
 const BUFFER_CAP = 500;
 const SNAPSHOT_CAP = 20_000;
@@ -32,17 +46,22 @@ interface NetworkEntry {
   ts: string;
 }
 
+interface Session {
+  dir: string;
+  phase: Phase;
+  shotCounters: Partial<Record<Phase, number>>;
+}
+
 let engine: Engine = 'chromium';
 let headed = false;
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
+let session: Session | null = null;
+let adhocShotCounter = 0;
 
 const consoleBuf: ConsoleEntry[] = [];
 const networkBuf: NetworkEntry[] = [];
-
-let sessionDir: string | null = null;
-let shotCounter = 0;
 
 fs.mkdirSync(STATE_DIR, { recursive: true });
 const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
@@ -90,12 +109,54 @@ function attachPage(p: Page): void {
   });
 }
 
+function currentViewport(): { width: number; height: number } {
+  return session ? PHASE_VIEWPORTS[session.phase] : PHASE_VIEWPORTS.frontend;
+}
+
+/** Open a fresh context. Inside a session, it records video at the phase viewport. */
+async function openContext(): Promise<void> {
+  if (!browser) throw new Error('browser not launched');
+  const viewport = currentViewport();
+  context = await browser.newContext({
+    viewport,
+    ...(session
+      ? { recordVideo: { dir: path.join(session.dir, 'recordings'), size: viewport } }
+      : {}),
+  });
+  page = await context.newPage();
+  attachPage(page);
+}
+
+/** Close the current context; inside a session this finalizes the phase recording. */
+async function closeContext(): Promise<void> {
+  if (!context) return;
+  const video = page?.video() ?? null;
+  const phase = session?.phase;
+  const closingEngine = engine;
+  await context.close().catch(() => {});
+  context = null;
+  page = null;
+  if (video && session && phase) {
+    const dir = path.join(session.dir, 'recordings');
+    let target = path.join(dir, `${phase}-${closingEngine}.webm`);
+    for (let n = 2; fs.existsSync(target); n++) {
+      target = path.join(dir, `${phase}-${closingEngine}-${n}.webm`);
+    }
+    try {
+      await video.saveAs(target);
+      await video.delete();
+      log(`recording saved: ${target}`);
+    } catch (err) {
+      log(`recording save failed: ${err}`);
+    }
+  }
+}
+
 async function launch(nextEngine: Engine, nextHeaded: boolean): Promise<void> {
+  await closeContext();
   if (browser) {
     await browser.close().catch(() => {});
     browser = null;
-    context = null;
-    page = null;
   }
   const options = { headless: !nextHeaded };
   if (nextEngine === 'firefox') {
@@ -105,16 +166,18 @@ async function launch(nextEngine: Engine, nextHeaded: boolean): Promise<void> {
   } else {
     browser = await chromium.launch(options);
   }
-  context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  page = await context.newPage();
-  attachPage(page);
   engine = nextEngine;
   headed = nextHeaded;
+  await openContext();
   log(`launched ${nextEngine} (headed=${nextHeaded})`);
 }
 
 async function ensurePage(): Promise<Page> {
-  if (!page) await launch(engine, headed);
+  if (!browser) {
+    await launch(engine, headed);
+  } else if (!context) {
+    await openContext();
+  }
   return page as Page;
 }
 
@@ -146,11 +209,19 @@ function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'session';
 }
 
-function shotDir(cwd: string): string {
-  if (sessionDir) return sessionDir;
+function nextShotFile(name: string, cwd: string): string {
+  if (session) {
+    const phase = session.phase;
+    const count = (session.shotCounters[phase] ?? 0) + 1;
+    session.shotCounters[phase] = count;
+    const dir = path.join(session.dir, phase);
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `${String(count).padStart(2, '0')}-${name}.png`);
+  }
+  adhocShotCounter += 1;
   const dir = path.join(cwd, 'reports', '_adhoc');
   fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return path.join(dir, `${String(adhocShotCounter).padStart(2, '0')}-${name}.png`);
 }
 
 function truncate(text: string, cap: number): string {
@@ -167,7 +238,8 @@ const handlers: Record<string, Handler> = {
       headed,
       url: page ? page.url() : null,
       title: page ? await page.title().catch(() => null) : null,
-      session: sessionDir,
+      session: session?.dir ?? null,
+      phase: session?.phase ?? null,
       consoleBuffered: consoleBuf.length,
       networkBuffered: networkBuf.length,
     };
@@ -177,7 +249,23 @@ const handlers: Record<string, Handler> = {
     const next = args[0] as Engine;
     if (!ENGINES.includes(next)) throw new Error(`unknown engine "${args[0]}" — use: ${ENGINES.join(', ')}`);
     await launch(next, args.includes('headed'));
-    return { engine, headed };
+    return { engine, headed, phase: session?.phase ?? null };
+  },
+
+  async phase(args) {
+    if (!session) throw new Error('no active session — run: qab session start <name>');
+    const next = args[0] as Phase;
+    if (!PHASES.includes(next)) throw new Error(`unknown phase "${args[0]}" — use: ${PHASES.join(', ')}`);
+    await ensurePage();
+    await closeContext();
+    session.phase = next;
+    await openContext();
+    const viewport = currentViewport();
+    return {
+      phase: next,
+      viewport: `${viewport.width}x${viewport.height}`,
+      recording: `recordings/${next}-${engine}.webm (finalized when the phase ends)`,
+    };
   },
 
   async goto(args) {
@@ -243,7 +331,7 @@ const handlers: Record<string, Handler> = {
   async viewport(args) {
     const width = Number(args[0]);
     const height = Number(args[1]);
-    if (!width || !height) throw new Error('usage: viewport <width> <height>');
+    if (!width || !height) throw new Error('usage: viewport <width> <height>  (note: inside a session, prefer `qab phase mobile` — recordings keep the viewport they started with)');
     const p = await ensurePage();
     await p.setViewportSize({ width, height });
     return { viewport: `${width}x${height}` };
@@ -257,9 +345,8 @@ const handlers: Record<string, Handler> = {
 
   async shot(args, cwd) {
     const p = await ensurePage();
-    shotCounter += 1;
-    const name = slugify(args.join(' ') || `shot-${shotCounter}`);
-    const file = path.join(shotDir(cwd), `${String(shotCounter).padStart(2, '0')}-${name}.png`);
+    const name = slugify(args.join(' ') || 'shot');
+    const file = nextShotFile(name, cwd);
     await p.screenshot({ path: file, fullPage: !args.includes('viewport') });
     return { path: file };
   },
@@ -296,6 +383,7 @@ const handlers: Record<string, Handler> = {
     const body = rest.join(' ') || undefined;
     if (body) headers['content-type'] = 'application/json';
     const t0 = Date.now();
+    let result: Record<string, unknown>;
     try {
       const res = await fetch(url, { method: method.toUpperCase(), headers, body });
       const ms = Date.now() - t0;
@@ -310,36 +398,55 @@ const handlers: Record<string, Handler> = {
           validJson = false;
         }
       }
-      return { status: res.status, ok: res.ok, ms, contentType, validJson, bodyPreview: truncate(text, BODY_PREVIEW_CAP) };
+      result = { status: res.status, httpOk: res.ok, ms, contentType, validJson, bodyPreview: truncate(text, BODY_PREVIEW_CAP) };
     } catch (err) {
-      return { error: String(err), ms: Date.now() - t0 };
+      result = { error: String(err), ms: Date.now() - t0 };
     }
+    if (session) {
+      const backendDir = path.join(session.dir, 'backend');
+      fs.mkdirSync(backendDir, { recursive: true });
+      const entry: Record<string, unknown> = { ts: new Date().toISOString(), method: method.toUpperCase(), url, body, ...result };
+      if (typeof entry.bodyPreview === 'string') entry.bodyPreview = truncate(entry.bodyPreview, 500);
+      fs.appendFileSync(path.join(backendDir, 'api-log.jsonl'), `${JSON.stringify(entry)}\n`);
+    }
+    return result;
   },
 
   async session(args, cwd) {
     const sub = args[0];
     if (sub === 'start') {
+      await closeContext();
       const name = slugify(args.slice(1).join(' ') || 'qa');
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
-      sessionDir = path.join(cwd, 'reports', `${stamp}-${name}`);
-      fs.mkdirSync(sessionDir, { recursive: true });
-      shotCounter = 0;
+      const dir = path.join(cwd, 'reports', `${stamp}-${name}`);
+      for (const sub of [...PHASES, 'recordings']) fs.mkdirSync(path.join(dir, sub), { recursive: true });
+      session = { dir, phase: 'frontend', shotCounters: {} };
       consoleBuf.length = 0;
       networkBuf.length = 0;
-      return { session: sessionDir };
+      if (browser) await openContext();
+      return {
+        session: dir,
+        phase: 'frontend',
+        structure: 'frontend/ mobile/ backend/ recordings/ — screenshots route to the current phase, api calls log to backend/api-log.jsonl',
+      };
     }
     if (sub === 'end') {
-      const ended = sessionDir;
-      sessionDir = null;
-      return { ended };
+      if (!session) return { ended: null };
+      await closeContext();
+      const ended = session.dir;
+      session = null;
+      return { ended, recordings: listRecordings(ended) };
     }
-    return { session: sessionDir, shots: shotCounter };
+    return { session: session?.dir ?? null, phase: session?.phase ?? null, shots: session?.shotCounters ?? {} };
   },
 
   async stop() {
+    // Deregister immediately so the next qab command starts a fresh daemon
+    // instead of reaching this one while its browser is still closing.
+    clearStateIfOwned(process.pid);
     setTimeout(async () => {
+      await closeContext();
       if (browser) await browser.close().catch(() => {});
-      clearState();
       server.close();
       logStream.end();
       process.exit(0);
@@ -347,6 +454,14 @@ const handlers: Record<string, Handler> = {
     return { stopping: true };
   },
 };
+
+function listRecordings(sessionDir: string): string[] {
+  try {
+    return fs.readdirSync(path.join(sessionDir, 'recordings')).filter((f) => f.endsWith('.webm'));
+  } catch {
+    return [];
+  }
+}
 
 const token = crypto.randomBytes(24).toString('hex');
 
@@ -381,6 +496,6 @@ server.listen(0, '127.0.0.1', () => {
 });
 
 process.on('SIGTERM', () => {
-  clearState();
+  clearStateIfOwned(process.pid);
   process.exit(0);
 });

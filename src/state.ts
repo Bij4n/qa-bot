@@ -36,3 +36,11 @@ export function clearState(): void {
     // already gone
   }
 }
+
+/** Clear the state file only if this pid still owns it — a dying daemon must
+ * not delete the registration of a newer daemon that replaced it. */
+export function clearStateIfOwned(pid: number): void {
+  const state = readState();
+  if (state && state.pid !== pid) return;
+  clearState();
+}
