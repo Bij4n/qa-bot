@@ -1,112 +1,126 @@
 # QA-Bot
 
-AI-driven QA agent for web applications. An AI agent (your Claude Code session)
-drives a real browser through your app — frontend flows and backend APIs — and
-produces a per-session report with a health score, severity-ranked findings,
-repro steps, full-page screenshots, and screen recordings of every test phase.
+QA agent for web apps. It hooks into Claude Code as a skill: you type
+`/qa-bot test http://localhost:3000`, the agent drives a real browser through
+the app, pokes at forms, checks the mobile layout, hits the API directly, and
+leaves behind a report folder with screenshots, screen recordings and a log of
+every API call it made.
 
-Two pieces:
+There's no test script to write or maintain. The agent decides what to test
+the same way a QA engineer would, and the `qab` CLI gives it fast hands on a
+real browser. Chromium, Chrome and Firefox, on Linux, macOS and Windows.
 
-- **`qab`** — a fast multi-browser CLI. A background daemon keeps a Playwright
-  browser warm, so every command (navigate, click, screenshot, API check) is a
-  ~100ms localhost call. Engines: **Chromium, Chrome, Firefox** on
-  **Linux, Windows, and macOS**.
-- **The `qa-bot` skill** — the QA methodology prompt that turns a Claude Code
-  session into the QA engineer: what to test, how to classify severity, how to
-  score health, and the exact report format.
+## Requirements
 
-## Install
+- Node 20+
+- Claude Code
+- Google Chrome, if you want to test against real Chrome (`qab engine chrome`).
+  Chromium and Firefox come bundled through Playwright, nothing to install.
 
-Requires [Node.js](https://nodejs.org) 20+.
+## Setup
 
 ```bash
-git clone <this-repo> && cd QA-Bot
+git clone git@github.com:biodexic/QA-Bot.git
+cd QA-Bot
 npm install
-npx playwright install chromium firefox   # downloads the browser engines
+npx playwright install chromium firefox
 npm run build
-npm link                                  # puts `qab` on your PATH
+npm link          # puts `qab` on your PATH
 ```
 
-`qab engine chrome` additionally requires Google Chrome installed on the machine
-(it drives your real Chrome instead of bundled Chromium).
+On a fresh Linux box you may need the browser system deps as well:
+`npx playwright install --with-deps chromium firefox`.
 
-### Register the skill (Claude Code)
-
-Copy or symlink the skill directory so Claude Code discovers it:
+Then register the skill so Claude Code picks it up:
 
 ```bash
 # macOS / Linux
 ln -s "$(pwd)/skill" ~/.claude/skills/qa-bot
+```
 
-# Windows (PowerShell)
+```powershell
+# Windows
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\qa-bot" -Target "$(Get-Location)\skill"
 ```
 
-Then in any Claude Code session:
+That's the whole install. Open Claude Code in whatever project you want
+tested and run:
 
 ```
 /qa-bot test http://localhost:3000
 ```
 
-## What a session produces
+The agent will ask how deep to go (quick / standard / exhaustive), work
+through the app, and hand you the report path when it's done.
 
-Sessions are organized by test phase — frontend (desktop), mobile, and
-backend/API — with everything routed automatically:
+## What a session gives you
+
+Every run creates a folder under `reports/` in the project you ran it from,
+organized by what was being tested:
 
 ```
 reports/2026-07-15-14-30-myapp/
-├── report.md                        # health score, findings by severity, repro steps
-├── frontend/                        # desktop pass — full-page screenshots
-│   ├── 01-home.png
-│   └── 02-bug-checkout-500.png
-├── mobile/                          # mobile pass (375x812)
-│   └── 01-home.png
+├── report.md                  health score, findings by severity, repro steps
+├── frontend/                  desktop screenshots, numbered in test order
+├── mobile/                    mobile layout screenshots (375x812)
 ├── backend/
-│   └── api-log.jsonl                # every API call: status, latency, body preview
-└── recordings/                      # screen recordings, per phase per engine
-    ├── frontend-chromium.webm
+│   └── api-log.jsonl          every API call: status, latency, body preview
+└── recordings/
+    ├── frontend-chromium.webm one screen recording per phase, per engine
     ├── mobile-chromium.webm
     └── frontend-firefox.webm
 ```
 
-`qab phase frontend|mobile|backend` switches phases: it finalizes the current
-phase's screen recording, starts a new one at the right viewport, and routes
-subsequent screenshots to that phase's folder. `qab api` calls are logged to
-`backend/api-log.jsonl` automatically during a session.
+`report.md` scores the app out of 10 and ranks findings critical / high /
+medium / cosmetic. Each finding comes with repro steps and a screenshot,
+because a bug report you can't reproduce is worthless.
 
-Findings follow a strict format — severity (Critical / High / Medium /
-Cosmetic), affected area, numbered repro steps, expected vs actual, and
-photographic evidence. The health score starts at 10 and deducts per finding.
+## Using qab by hand
 
-## Using `qab` directly
+The agent does everything through the `qab` CLI, and you can too. A
+background daemon keeps the browser warm so commands come back in ~100ms:
 
 ```bash
-qab session start myapp        # begin a session → reports/<ts>-myapp/ (recording starts)
-qab goto http://localhost:3000 # navigate; reports console errors + failed requests
-qab snapshot                   # accessibility-tree view of the page
-qab click "text=Sign up"       # css / text= / role= selectors
+qab session start myapp          # new report folder, recording starts
+qab goto http://localhost:3000   # reports console errors + failed requests
+qab snapshot                     # accessibility-tree view of the page
+qab click "text=Sign up"
 qab fill "#email" user@test.dev
-qab shot signup-page           # full-page screenshot → frontend/
-qab phase mobile               # finalize frontend video, record mobile at 375x812
-qab shot signup-page           # → mobile/
-qab phase backend              # finalize mobile video, start backend phase
-qab api POST http://localhost:3000/api/users '{"email":""}'   # → backend/api-log.jsonl
-qab network failed             # every failed request captured so far
-qab engine firefox             # switch engines (recordings are per phase, per engine)
-qab session end                # finalize the last recording, list all recordings
-qab stop                       # shut the daemon down
+qab shot signup                  # full-page screenshot -> frontend/
+qab phase mobile                 # switch to 375x812, new recording
+qab phase backend
+qab api POST http://localhost:3000/api/users '{"email":""}'
+qab engine firefox               # rerun anything in firefox
+qab session end                  # finalizes the last recording
+qab stop                         # kill the daemon
 ```
 
-Run `qab help` for the full command list. Daemon state lives in `~/.qa-bot/`
-(log: `~/.qa-bot/daemon.log`).
+`qab help` lists everything. Daemon state and logs live in `~/.qa-bot/`.
 
-## Platform notes
+## Testing behind a login
 
-| | Chromium | Chrome | Firefox |
-|---|---|---|---|
-| Linux | ✅ bundled | ✅ if installed | ✅ bundled |
-| macOS | ✅ bundled | ✅ if installed | ✅ bundled |
-| Windows | ✅ bundled | ✅ if installed | ✅ bundled |
+If the app needs an account, the agent will ask you for test credentials and
+log in through the form like a user would. Use a staging account. Don't point
+it at production with real customer data.
 
-On Linux CI or fresh servers, install system dependencies with
-`npx playwright install --with-deps chromium firefox`.
+## Rolling it out to the team
+
+There's nothing to deploy server-side. Each developer runs the setup above
+once on their machine and updates with:
+
+```bash
+git pull && npm run build
+```
+
+If the daemon acts weird after an update, `qab stop` and try again.
+
+## Troubleshooting
+
+- **daemon failed to start** — check `~/.qa-bot/daemon.log`
+- **want to watch it work** — everything is headless by default;
+  `qab engine chromium headed` opens a visible window
+- **`qab engine chrome` fails** — Chrome isn't installed on that machine.
+  Chromium is the same engine and always available.
+- **recordings look letterboxed** — don't resize with `qab viewport` during a
+  session; use `qab phase mobile`, which starts a fresh recording at the right
+  size
